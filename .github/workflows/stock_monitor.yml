@@ -1,0 +1,131 @@
+name: 📊 Stock Alert Monitor
+
+on:
+  # Run every 15 minutes during US market hours (ET = UTC-5/UTC-4)
+  # Market hours: 9:30 AM - 4:00 PM ET = 14:30 - 21:00 UTC
+  # Also runs 30min before open and 30min after close for pre/post market
+  schedule:
+    - cron: "*/15 14-21 * * 1-5"   # Every 15min, Mon-Fri, 14:00-21:59 UTC
+
+  # Daily heartbeat at 9:00 AM JST (00:00 UTC)
+    - cron: "0 0 * * 1-5"
+
+  # Allow manual trigger from GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: false
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - heartbeat
+          - test
+
+permissions:
+  contents: write   # needed to commit signal_state.json
+
+jobs:
+  stock-monitor:
+    name: 📈 Analyze & Notify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── Python setup ──────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Determine run mode ────────────────────────────────────
+      - name: Determine run mode
+        id: mode
+        run: |
+          GITHUB_EVENT="${{ github.event_name }}"
+          INPUT_MODE="${{ github.event.inputs.mode }}"
+
+          # Daily heartbeat cron (00:00 UTC)
+          CURRENT_MINUTE=$(date -u +"%M")
+          CURRENT_HOUR=$(date -u +"%H")
+
+          if [ "$INPUT_MODE" = "heartbeat" ]; then
+            echo "mode=heartbeat" >> $GITHUB_OUTPUT
+          elif [ "$INPUT_MODE" = "test" ]; then
+            echo "mode=test" >> $GITHUB_OUTPUT
+          elif [ "$CURRENT_HOUR" = "00" ] && [ "$CURRENT_MINUTE" = "00" ]; then
+            echo "mode=heartbeat" >> $GITHUB_OUTPUT
+          else
+            echo "mode=normal" >> $GITHUB_OUTPUT
+          fi
+
+      # ── Restore signal state ──────────────────────────────────
+      - name: Restore signal state
+        run: |
+          if [ -f signal_state.json ]; then
+            echo "Signal state file found:"
+            cat signal_state.json
+          else
+            echo "No state file found, starting fresh"
+            echo "{}" > signal_state.json
+          fi
+
+      # ── Run analysis ──────────────────────────────────────────
+      - name: Run stock analysis (normal)
+        if: steps.mode.outputs.mode == 'normal'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python main.py
+
+      - name: Run heartbeat
+        if: steps.mode.outputs.mode == 'heartbeat'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python main.py --heartbeat
+
+      - name: Run test (sends test signal to Discord)
+        if: steps.mode.outputs.mode == 'test'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python -c "
+          from notifier import send_discord_notification
+          from analyzer import Signal
+          from datetime import datetime
+          s = Signal(
+              ticker='NVDA',
+              signal_type='bottom',
+              signal_name_jp='🟢 底打ちシグナル',
+              current_price=105.50,
+              reason='テスト通知 — システム正常稼働中',
+              strength='中',
+              rsi=32.5,
+              ma50=115.0,
+              ma200=98.5,
+              timestamp=datetime.now(),
+          )
+          send_discord_notification([s])
+          print('Test notification sent!')
+          "
+
+      # ── Commit updated state ──────────────────────────────────
+      - name: Commit signal state
+        if: steps.mode.outputs.mode == 'normal'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add signal_state.json
+          # Only commit if there are changes
+          git diff --staged --quiet || git commit -m "chore: update signal state [skip ci]"
+          git push
