@@ -99,25 +99,21 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          python -c "
-          from notifier import send_discord_notification
-          from analyzer import Signal
-          from datetime import datetime
-          s = Signal(
-              ticker='NVDA',
-              signal_type='bottom',
-              signal_name_jp='🟢 底打ちシグナル',
-              current_price=105.50,
-              reason='テスト通知 — システム正常稼働中',
-              strength='中',
-              rsi=32.5,
-              ma50=115.0,
-              ma200=98.5,
-              timestamp=datetime.now(),
-          )
-          send_discord_notification([s])
-          print('Test notification sent!')
-          "
+          python - <<'EOF'
+          import os, json, urllib.request, urllib.error
+          url = os.environ.get("DISCORD_WEBHOOK_URL", "")
+          print("URL length:", len(url))
+          payload = {"content": "Stock Alert Bot テスト通知 - システム正常稼働中! NVDA & PLTR の監視が開始されました"}
+          data = json.dumps(payload).encode("utf-8")
+          req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "User-Agent": "StockAlertBot/1.0"}, method="POST")
+          try:
+              with urllib.request.urlopen(req, timeout=10) as r:
+                  print("Success:", r.getcode())
+          except urllib.error.HTTPError as e:
+              print("HTTP Error:", e.code, e.read().decode())
+          except Exception as e:
+              print("Error:", e)
+          EOF
 
       # ── Commit updated state ──────────────────────────────────
       - name: Commit signal state
